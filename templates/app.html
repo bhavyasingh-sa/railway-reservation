@@ -1,0 +1,521 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    {% set titles = {'register':'Register','login':'Login','index':'Search Trains',
+                      'search':'Train Results','book':'Book Ticket','pnr_status':'PNR Status',
+                      'my_bookings':'My Bookings','dashboard':'Admin Dashboard'} %}
+    <title>{% if page == 'pnr_detail' %}PNR {{ pnr_display }}{% else %}{{ titles.get(page, '') }}{% endif %}</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { background:#f4f6f9; }
+        .navbar-brand { font-weight:700; letter-spacing:.5px; }
+        .status-AVAILABLE { color:#198754; font-weight:600; }
+        .status-RAC { color:#fd7e14; font-weight:600; }
+        .status-WL { color:#dc3545; font-weight:600; }
+        .status-REGRET { color:#6c757d; font-weight:700; letter-spacing:.03em; }
+        .card { border:none; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+    </style>
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+    <div class="container">
+        <a class="navbar-brand" href="{{ url_for('index') }}"></a>
+        <div class="collapse navbar-collapse">
+            <ul class="navbar-nav me-auto">
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('index') }}">Search Trains</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('pnr_status') }}">PNR Status</a></li>
+                {% if session.get('user_id') %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('my_bookings') }}">My Bookings</a></li>
+                {% endif %}
+                {% if session.get('is_admin') %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}">Admin Dashboard</a></li>
+                {% endif %}
+            </ul>
+            <ul class="navbar-nav">
+                {% if session.get('user_id') %}
+                <li class="nav-item"><span class="nav-link">Hi, {{ session['name'] }}</span></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}">Logout</a></li>
+                {% else %}
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
+                <li class="nav-item"><a class="nav-link" href="{{ url_for('register') }}">Register</a></li>
+                {% endif %}
+            </ul>
+        </div>
+    </div>
+</nav>
+<div class="container mb-5">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% for category, message in messages %}
+        <div class="alert alert-{{ category }} alert-dismissible fade show" role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% endfor %}
+    {% endwith %}
+
+    {# ================= index ================= #}
+    {% if page == 'index' %}
+    <div class="card p-4 mx-auto" style="max-width:600px;">
+        <h3 class="mb-3">Find Trains</h3>
+        <form action="{{ url_for('search') }}" method="get">
+            <datalist id="city-list">
+                {% for c in cities %}<option value="{{ c.name }}" data-id="{{ c.city_id }}"></option>{% endfor %}
+            </datalist>
+            <div class="mb-3">
+                <label class="form-label" for="from-city">From</label>
+                <input type="text" id="from-city" class="form-control city-input" list="city-list"
+                       placeholder="Type a city" autocomplete="off" required>
+                <input type="hidden" name="from_city_id" id="from-city-id">
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="to-city">To</label>
+                <input type="text" id="to-city" class="form-control city-input" list="city-list"
+                       placeholder="Type a city" autocomplete="off" required>
+                <input type="hidden" name="to_city_id" id="to-city-id">
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Journey Date</label>
+                <input type="date" name="journey_date" class="form-control" min="{{ min_date }}" required>
+            </div>
+            <button class="btn btn-primary w-100" type="submit">Search Trains</button>
+        </form>
+        <script>
+            (function () {
+                const ids = {};
+                document.querySelectorAll('#city-list option').forEach(o => { ids[o.value.toLowerCase()] = o.dataset.id; });
+                function wire(inputId, hiddenId) {
+                    const input = document.getElementById(inputId), hidden = document.getElementById(hiddenId);
+                    function sync() {
+                        const id = ids[input.value.trim().toLowerCase()];
+                        hidden.value = id || '';
+                        input.setCustomValidity(id ? '' : 'Pick a city from the list');
+                    }
+                    input.addEventListener('input', sync);
+                    input.addEventListener('change', sync);
+                    sync();
+                }
+                wire('from-city', 'from-city-id');
+                wire('to-city', 'to-city-id');
+            })();
+        </script>
+    </div>
+
+    {# ================= search results ================= #}
+    {% elif page == 'search' %}
+    <h4 class="mb-3">Trains on {{ journey_date }}</h4>
+
+    <div class="d-flex align-items-center mb-2">
+        <button class="btn btn-outline-dark btn-sm" type="button" data-bs-toggle="collapse"
+                data-bs-target="#filter-panel" aria-expanded="false" aria-controls="filter-panel">
+            Filters{% if filters_count %} <span class="badge text-bg-primary">{{ filters_count }}</span>{% endif %} &#9662;
+        </button>
+        {% if filters_active %}
+        <a class="btn btn-link btn-sm" href="{{ url_for('search', from_city_id=from_city_id, to_city_id=to_city_id, journey_date=journey_date) }}">Clear</a>
+        {% endif %}
+        <span class="text-muted small ms-auto">{{ trains|length }} train{{ '' if trains|length == 1 else 's' }}</span>
+    </div>
+
+    <form method="get" action="{{ url_for('search') }}" class="card p-3 mb-3 collapse" id="filter-panel">
+        <input type="hidden" name="from_city_id" value="{{ from_city_id }}">
+        <input type="hidden" name="to_city_id" value="{{ to_city_id }}">
+        <input type="hidden" name="journey_date" value="{{ journey_date }}">
+        <div class="row g-3">
+            <div class="col-md-4">
+                <div class="form-label fw-semibold mb-1">Class</div>
+                {% for c in all_classes %}
+                <div class="form-check form-check-inline">
+                    <input class="form-check-input" type="checkbox" name="cls" value="{{ c }}" id="cls-{{ c }}" {% if c in f_classes %}checked{% endif %}>
+                    <label class="form-check-label" for="cls-{{ c }}">{{ c }}</label>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="col-md-4">
+                <div class="form-label fw-semibold mb-1">Departure time</div>
+                {% for key, slot in slots.items() %}
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="slot" value="{{ key }}" id="slot-{{ key }}" {% if key in f_slots %}checked{% endif %}>
+                    <label class="form-check-label" for="slot-{{ key }}">{{ slot[0] }}</label>
+                </div>
+                {% endfor %}
+            </div>
+            <div class="col-md-4">
+                <label class="form-label fw-semibold mb-1" for="max-price">Max fare (&#8377;)</label>
+                <input type="number" min="0" step="50" class="form-control mb-2" id="max-price" name="max_price" value="{{ f_max_price or '' }}" placeholder="No limit">
+                <label class="form-label fw-semibold mb-1" for="sort">Sort by</label>
+                <select class="form-select mb-2" id="sort" name="sort">
+                    <option value="" {% if not f_sort %}selected{% endif %}>Default</option>
+                    <option value="price" {% if f_sort == 'price' %}selected{% endif %}>Lowest fare</option>
+                    <option value="departure" {% if f_sort == 'departure' %}selected{% endif %}>Earliest departure</option>
+                    <option value="duration" {% if f_sort == 'duration' %}selected{% endif %}>Shortest journey</option>
+                </select>
+                <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="hide_wl" value="1" id="hide-wl" {% if f_hide_wl %}checked{% endif %}>
+                    <label class="form-check-label" for="hide-wl">Hide waitlisted</label>
+                </div>
+            </div>
+        </div>
+        <div class="d-flex gap-2 mt-3">
+            <button class="btn btn-primary btn-sm" type="submit">Apply filters</button>
+        </div>
+    </form>
+
+    {% if not trains %}
+    <div class="alert alert-info">{% if filters_active %}No trains match these filters.{% else %}No direct trains found on this route.{% endif %}</div>
+    {% endif %}
+    {% for t in trains %}
+    <div class="card mb-3 p-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+                <strong>{{ t.number }} - {{ t.name }}</strong>
+                <div class="text-muted small">
+                    Board: {{ t.from_station.name }} ({{ t.from_station.code }}) &rarr;
+                    Alight: {{ t.to_station.name }} ({{ t.to_station.code }}) &middot; {{ t.distance_km }} km
+                    {% if t.timing %}&middot; {{ t.timing }}{% endif %}
+                </div>
+            </div>
+        </div>
+        <table class="table table-sm align-middle mb-0">
+            <thead>
+                <tr><th>Class</th><th>Quota</th><th>Fare</th><th>Status</th><th></th></tr>
+            </thead>
+            <tbody>
+            {% for o in t.options %}
+                <tr>
+                    <td>{{ o.class_code }}</td>
+                    <td>{{ o.quota_name }}</td>
+                    <td>&#8377;{{ o.fare }}</td>
+                    <td>
+                        {% if o.regret %}
+                            <span class="status-REGRET">REGRET</span>
+                        {% elif o.is_open %}
+                            <span class="status-{{ o.status.split('-')[0].split(' ')[0] }}">{{ o.status }}</span>
+                        {% else %}
+                            <span class="text-muted">Opens {{ o.opens_at }}</span>
+                        {% endif %}
+                    </td>
+                    <td>
+                        {% if o.is_open %}
+                        <a class="btn btn-sm btn-outline-primary"
+                           href="{{ url_for('book_form', train_id=t.train_id, class_code=o.class_code, quota_code=o.quota_code, from_id=t.from_id, to_id=t.to_id, journey_date=journey_date) }}">
+                           Book
+                        </a>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endfor %}
+
+    {# ================= book ================= #}
+    {% elif page == 'book' %}
+    <div class="card p-4 mx-auto" style="max-width:700px;">
+        <h4>{{ train.number }} - {{ train.name }}</h4>
+        <p class="text-muted">{{ from_station.name }} &rarr; {{ to_station.name }} | {{ journey_date }} | Class: {{ class_code }} | Quota: {{ quota_code }}</p>
+        <form action="{{ url_for('book_submit') }}" method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="train_id" value="{{ train.train_id }}">
+            <input type="hidden" name="class_code" value="{{ class_code }}">
+            <input type="hidden" name="quota_code" value="{{ quota_code }}">
+            <input type="hidden" name="from_id" value="{{ from_id }}">
+            <input type="hidden" name="to_id" value="{{ to_id }}">
+            <input type="hidden" name="journey_date" value="{{ journey_date }}">
+
+            <div id="passenger-rows">
+                <div class="passenger-row border rounded p-2 mb-2">
+                    <div class="row g-2 mb-2">
+                        <div class="col-5"><input class="form-control" name="name[]" placeholder="Full name" required></div>
+                        <div class="col-3"><input class="form-control" type="number" name="age[]" placeholder="Age" min="1" max="120" required></div>
+                        <div class="col-4">
+                            <select class="form-select" name="gender[]" required>
+                                <option value="M">Male</option>
+                                <option value="F">Female</option>
+                                <option value="O">Other</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="row g-2">
+                        {% if has_berths %}
+                        <div class="col-6">
+                            <select class="form-select form-select-sm" name="berth_pref[]">
+                                <option value="NO_PREFERENCE" selected>Berth: No Preference</option>
+                                <option value="LOWER">Lower</option>
+                                <option value="MIDDLE">Middle</option>
+                                <option value="UPPER">Upper</option>
+                                <option value="SIDE_LOWER">Side Lower</option>
+                                <option value="SIDE_UPPER">Side Upper</option>
+                            </select>
+                        </div>
+                        <div class="col-6">
+                        {% else %}
+                        <input type="hidden" name="berth_pref[]" value="NO_PREFERENCE">
+                        <div class="col-12">
+                        {% endif %}
+                            <select class="form-select form-select-sm" name="food_pref[]">
+                                <option value="NO_FOOD" selected>Food: No Food</option>
+                                <option value="VEG">Veg</option>
+                                <option value="NON_VEG">Non-Veg</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mb-3" onclick="addRow()">+ Add Passenger</button>
+            <br>
+            <button class="btn btn-primary" type="submit">Confirm Booking</button>
+        </form>
+    </div>
+
+    <template id="row-template">
+        <div class="passenger-row border rounded p-2 mb-2">
+            <div class="row g-2 mb-2">
+                <div class="col-5"><input class="form-control" name="name[]" placeholder="Full name" required></div>
+                <div class="col-3"><input class="form-control" type="number" name="age[]" placeholder="Age" min="1" max="120" required></div>
+                <div class="col-4">
+                    <select class="form-select" name="gender[]" required>
+                        <option value="M">Male</option>
+                        <option value="F">Female</option>
+                        <option value="O">Other</option>
+                    </select>
+                </div>
+            </div>
+            <div class="row g-2">
+                {% if has_berths %}
+                <div class="col-6">
+                    <select class="form-select form-select-sm" name="berth_pref[]">
+                        <option value="NO_PREFERENCE" selected>Berth: No Preference</option>
+                        <option value="LOWER">Lower</option>
+                        <option value="MIDDLE">Middle</option>
+                        <option value="UPPER">Upper</option>
+                        <option value="SIDE_LOWER">Side Lower</option>
+                        <option value="SIDE_UPPER">Side Upper</option>
+                    </select>
+                </div>
+                <div class="col-6">
+                {% else %}
+                <input type="hidden" name="berth_pref[]" value="NO_PREFERENCE">
+                <div class="col-12">
+                {% endif %}
+                    <select class="form-select form-select-sm" name="food_pref[]">
+                        <option value="NO_FOOD" selected>Food: No Food</option>
+                        <option value="VEG">Veg</option>
+                        <option value="NON_VEG">Non-Veg</option>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </template>
+
+    <script>
+    function addRow() {
+        const rows = document.getElementById('passenger-rows');
+        if (rows.children.length >= 6) { alert('Max 6 passengers per PNR'); return; }
+        const tmpl = document.getElementById('row-template');
+        rows.appendChild(tmpl.content.cloneNode(true));
+    }
+    </script>
+
+    {# ================= pnr detail ================= #}
+    {% elif page == 'pnr_detail' %}
+    <div class="card p-4 mx-auto" style="max-width:820px;">
+        <h4>PNR: {{ pnr_display }}
+            <span class="badge {{ 'bg-success' if booking.status=='ACTIVE' else 'bg-secondary' }}">{{ booking.status }}</span>
+        </h4>
+        <p class="text-muted mb-1">{{ booking.train_number }} - {{ booking.train_name }} | {{ booking.class_code }} / {{ booking.quota_code }}</p>
+        <p class="text-muted mb-1">{{ booking.from_name }} &rarr; {{ booking.to_name }} on {{ booking.journey_date }}</p>
+        {% if booking.timing %}<p class="text-muted">{{ booking.timing }}</p>{% endif %}
+        <p><strong>Total Fare:</strong> &#8377;{{ booking.total_fare }}</p>
+
+        <table class="table">
+            <thead><tr><th>Name</th><th>Age</th><th>Gender</th><th>Status</th><th>Food</th><th></th></tr></thead>
+            <tbody>
+            {% for p in passengers %}
+                <tr>
+                    <td>{{ p.name }}</td>
+                    <td>{{ p.age }}</td>
+                    <td>{{ p.gender }}</td>
+                    <td>{{ p.display_status }}</td>
+                    <td>{{ p.food_preference.replace('_',' ').title() }}</td>
+                    <td>
+                        {% if p.seat_status != 'CANCELLED' and session.get('user_id') == booking.user_id %}
+                        <form action="{{ url_for('cancel_passenger', passenger_id=p.passenger_id) }}" method="post" onsubmit="return confirm('Cancel the ticket for {{ p.name|e }}?');">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                            <button class="btn btn-sm btn-outline-danger">Cancel ticket</button>
+                        </form>
+                        {% endif %}
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    {# ================= pnr status lookup ================= #}
+    {% elif page == 'pnr_status' %}
+    <div class="card p-4 mx-auto" style="max-width:500px;">
+        <h4 class="mb-3">Check PNR Status</h4>
+        <form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="mb-3">
+                <input class="form-control" name="pnr" placeholder="Enter PNR number" required>
+            </div>
+            <button class="btn btn-primary w-100" type="submit">Check Status</button>
+        </form>
+    </div>
+
+    {# ================= my bookings ================= #}
+    {% elif page == 'my_bookings' %}
+    <h4 class="mb-3">My Bookings</h4>
+    {% if not bookings %}
+    <div class="alert alert-info">No bookings yet.</div>
+    {% endif %}
+    <table class="table bg-white">
+        <thead><tr><th>PNR</th><th>Train</th><th>Route</th><th>Date</th><th>Fare</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+        {% for b in bookings %}
+            <tr>
+                <td>{{ "%010d"|format(b.pnr_id) }}</td>
+                <td>{{ b.train_number }} - {{ b.train_name }}</td>
+                <td>{{ b.from_name }} &rarr; {{ b.to_name }}</td>
+                <td>{{ b.journey_date }}</td>
+                <td>&#8377;{{ b.total_fare }}</td>
+                <td><span class="badge {{ 'bg-success' if b.status=='ACTIVE' else 'bg-secondary' }}">{{ b.status }}</span></td>
+                <td><a class="btn btn-sm btn-outline-primary" href="{{ url_for('pnr_detail', pnr_id=b.pnr_id) }}">View</a></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+
+    {# ================= login ================= #}
+    {% elif page == 'login' %}
+    <div class="card p-4 mx-auto" style="max-width:400px;">
+        <h4 class="mb-3">Login</h4>
+        <form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="mb-3">
+                <label class="form-label">Email</label>
+                <input class="form-control" type="email" name="email" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Password</label>
+                <span class="input-group">
+                    <input class="form-control" type="password" name="password" required>
+                    <button type="button" class="btn btn-outline-secondary pw-toggle" aria-label="Show password" aria-pressed="false" title="Show / hide password">
+                        <svg class="pw-eye" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        <svg class="pw-eye-off d-none" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    </button>
+                </span>
+            </div>
+            <button class="btn btn-primary w-100" type="submit">Login</button>
+        </form>
+        <p class="mt-3 text-muted small">
+            New here? <a href="{{ url_for('register') }}">Create an account</a>.
+        </p>
+    </div>
+
+    {# ================= register ================= #}
+    {% elif page == 'register' %}
+    <div class="card p-4 mx-auto" style="max-width:400px;">
+        <h4 class="mb-3">Create Account</h4>
+        <form method="post">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <div class="mb-3">
+                <label class="form-label">Name</label>
+                <input class="form-control" name="name" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Email</label>
+                <input class="form-control" type="email" name="email" required>
+            </div>
+            <div class="mb-3">
+                <label class="form-label">Password</label>
+                <span class="input-group">
+                    <input class="form-control" type="password" name="password" required minlength="8">
+                    <button type="button" class="btn btn-outline-secondary pw-toggle" aria-label="Show password" aria-pressed="false" title="Show / hide password">
+                        <svg class="pw-eye" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                        <svg class="pw-eye-off d-none" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+                    </button>
+                </span>
+            </div>
+            <button class="btn btn-primary w-100" type="submit">Register</button>
+        </form>
+    </div>
+
+    {# ================= admin dashboard ================= #}
+    {% elif page == 'dashboard' %}
+    <h4 class="mb-3">Admin Dashboard</h4>
+    <div class="row g-3">
+        <div class="col-md-6">
+            <div class="card p-3">
+                <h6>Occupancy % by Train / Class / Quota</h6>
+                <canvas id="occupancyChart" height="220"></canvas>
+            </div>
+        </div>
+        <div class="col-md-6">
+            <div class="card p-3">
+                <h6>Revenue by Train</h6>
+                <canvas id="revenueChart" height="220"></canvas>
+            </div>
+        </div>
+    </div>
+    <div class="card p-3 mt-3">
+        <h6>Occupancy Detail</h6>
+        <table class="table table-sm" id="occupancyTable">
+            <thead><tr><th>Train</th><th>Class</th><th>Quota</th><th>Date</th><th>CNF</th><th>RAC</th><th>WL</th><th>Occ %</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+    <script>
+    fetch("{{ url_for('dashboard_data') }}")
+        .then(r => r.json())
+        .then(data => {
+            const occ = data.occupancy;
+            const labels = occ.map(o => `${o.number} ${o.class_code}/${o.quota_code}`);
+            new Chart(document.getElementById('occupancyChart'), {
+                type: 'bar',
+                data: { labels, datasets: [{ label: 'Occupancy %', data: occ.map(o => o.occupancy_pct), backgroundColor: '#0d6efd' }] },
+                options: { scales: { y: { beginAtZero: true, max: 100 } } }
+            });
+
+            const rev = data.revenue;
+            new Chart(document.getElementById('revenueChart'), {
+                type: 'doughnut',
+                data: {
+                    labels: rev.map(r => `${r.number} ${r.train_name}`),
+                    datasets: [{ data: rev.map(r => r.total_revenue), backgroundColor: ['#0d6efd','#198754','#fd7e14','#dc3545','#6f42c1'] }]
+                }
+            });
+
+            const tbody = document.querySelector('#occupancyTable tbody');
+            occ.forEach(o => {
+                const tr = document.createElement('tr');
+                tr.innerHTML = `<td>${o.number}</td><td>${o.class_code}</td><td>${o.quota_code}</td>
+                                <td>${o.journey_date}</td><td>${o.confirmed_count}</td>
+                                <td>${o.rac_count}</td><td>${o.waitlist_count}</td><td>${o.occupancy_pct}%</td>`;
+                tbody.appendChild(tr);
+            });
+        });
+    </script>
+    {% endif %}
+</div>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+document.querySelectorAll('.pw-toggle').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+        var input = btn.parentElement.querySelector('input');
+        var show = input.type === 'password';
+        input.type = show ? 'text' : 'password';
+        btn.setAttribute('aria-pressed', show ? 'true' : 'false');
+        btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+        btn.querySelector('.pw-eye').classList.toggle('d-none', show);
+        btn.querySelector('.pw-eye-off').classList.toggle('d-none', !show);
+    });
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,30 @@
+# Secrets / local config -- never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+env/
+
+# Database backups (large, may contain user data)
+backup/
+
+# Logs / generated output
+seed_run.log
+*.log
+
+# OS junk
+.DS_Store
+
+# Editor settings and local documents
+.vscode/
+.impeccable/
+report/
+
+# Raw responses saved from the railway data API (provider terms; kept locally)
+data/railradar_api/
