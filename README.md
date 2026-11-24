@@ -93,7 +93,7 @@ have been removed from the project; the app itself never calls any API.
 2. Load the schema — run `01`, `02`, `03`, `04` in that order; together they
    build the complete database.
    ```bash
-   cd railway-reservation-dbms
+   cd railway-reservation
    /usr/local/mysql/bin/mysql -u railway_app -p < sql/01_create_tables_trigger_views.sql
    /usr/local/mysql/bin/mysql -u railway_app -p < sql/02_stored_procedures.sql
    /usr/local/mysql/bin/mysql -u railway_app -p < sql/03_seed_classes_and_quotas.sql
