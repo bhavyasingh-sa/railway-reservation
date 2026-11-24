@@ -50,9 +50,9 @@ CREATE TABLE quotas (
     code         VARCHAR(10) NOT NULL UNIQUE,    -- GN, TQ, LD, SS
     name         VARCHAR(50) NOT NULL,
     fare_multiplier DECIMAL(4,2) NOT NULL DEFAULT 1.00,
-    -- how many days before journey this quota opens (GN = 120, TQ = 1)
+    -- how many days before journey this quota opens (GN = 60, TQ = 1)
     opens_days_before INT NOT NULL,
-    -- clock time the quota opens on its opening day (used by Tatkal: 10:00/11:00)
+    -- clock time the quota opens on its opening day (used by Tatkal: 10:00)
     opens_at_time TIME NULL
 );
 
