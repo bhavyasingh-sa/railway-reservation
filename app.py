@@ -18,7 +18,7 @@ from werkzeug.security import check_password_hash, generate_password_hash
 
 load_dotenv()
 
-DEBUG = os.getenv("APP_DEBUG") == "1"  # local development only; never set in production
+DEBUG = os.getenv("APP_DEBUG") == "1"
 
 app = Flask(__name__)
 
@@ -34,23 +34,25 @@ app.secret_key = _secret
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=not DEBUG,  # cookie only over HTTPS in production
+    SESSION_COOKIE_SECURE=not DEBUG,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
 CLASSES = ["SL", "3A", "2A"]
-PREMIUM_CLASSES = ["CC", "EC"]  # Tejas/Vande Bharat: chair car only, no berths
+PREMIUM_CLASSES = ["CC", "EC"]
 QUOTAS = ["GN", "TQ"]
 
 
-PREMIUM_MIN_FARE = 1000  # real Tejas/Vande Bharat fares are never under this
+PREMIUM_MIN_FARE = 1000
 
+# Departure-time filters: label shown to the user and the SQL condition it adds.
 DEPARTURE_SLOTS = {
     "early":     ("Early morning (00-06)", "(fm.dep_time >= '00:00:00' AND fm.dep_time < '06:00:00')"),
     "morning":   ("Morning (06-12)",       "(fm.dep_time >= '06:00:00' AND fm.dep_time < '12:00:00')"),
     "afternoon": ("Afternoon (12-18)",     "(fm.dep_time >= '12:00:00' AND fm.dep_time < '18:00:00')"),
     "night":     ("Evening / night (18-24)", "(fm.dep_time >= '18:00:00' AND fm.dep_time <= '23:59:59')"),
 }
+# Sort options: key sent by the browser and the ORDER BY text it maps to.
 SORT_SQL = {
     "price": "cheapest",
     "departure": "trip.dep_time IS NULL, trip.dep_time",
@@ -59,17 +61,17 @@ SORT_SQL = {
 
 
 def is_premium_train(train_name):
-    """Real Tejas/Vande Bharat trains: chair car only (CC/EC), and fares start high."""
+    """True for Tejas and Vande Bharat trains. Used by book_submit."""
     return "tejas" in train_name.lower() or "vande bharat" in train_name.lower()
 
 
 def format_berth(berth_type):
-    """Chair car seats have no berth_type (NULL) -- nothing to show for those."""
+    """Turn a berth code such as SIDE_LOWER into ' (Side Lower)'. Used by pnr_detail."""
     return f" ({berth_type.replace('_', ' ').title()})" if berth_type else ""
 
 
 def format_hhmm(value):
-    """PyMySQL returns TIME columns as timedelta (or None at origin/terminus)."""
+    """Turn a MySQL TIME value into 'HH:MM'. Used by search and pnr_detail."""
     if value is None:
         return None
     total_minutes = int(value.total_seconds() // 60)
@@ -77,10 +79,7 @@ def format_hhmm(value):
 
 
 def compute_fare(distance_km, cls, quota_multiplier, surge=1.0, is_premium=False):
-    """(base fare + distance*rate) is subject to quota/surge (Tatkal premium,
-    dynamic pricing); the reservation charge is a flat fee on top, same as
-    IRCTC's reservation charge not changing for Tatkal bookings. Premium
-    trains (Tejas/Vande Bharat) never price below PREMIUM_MIN_FARE."""
+    """Fare = (base + km x rate) x quota multiplier x surge + reservation charge, with a minimum for premium trains. Used by book_submit."""
     seat_fare = (float(cls["base_fare"]) + distance_km * float(cls["fare_per_km"])) * quota_multiplier * surge
     fare = seat_fare + float(cls["reservation_charge"])
     if is_premium:
@@ -89,6 +88,7 @@ def compute_fare(distance_km, cls, quota_multiplier, surge=1.0, is_premium=False
 
 
 def get_db():
+    """Open (or reuse) the MySQL connection for this request. Called by every route that reads or writes the database."""
     if "db" not in g:
         g.db = pymysql.connect(
             host=os.getenv("DB_HOST", "localhost"),
@@ -103,6 +103,7 @@ def get_db():
 
 @app.teardown_appcontext
 def close_db(exc):
+    """Commit if the request succeeded, otherwise roll back, then close the connection. Runs automatically after every request."""
     db = g.pop("db", None)
     if db is not None:
         if exc is None:
@@ -113,6 +114,7 @@ def close_db(exc):
 
 
 def login_required(f):
+    """Decorator: send visitors who are not logged in to the login page. Put on book_form, book_submit, pnr_detail, my_bookings and cancel_passenger."""
     @wraps(f)
     def wrapped(*args, **kwargs):
         if not session.get("user_id"):
@@ -123,6 +125,7 @@ def login_required(f):
 
 
 def admin_required(f):
+    """Decorator: let only admins through. Put on dashboard and dashboard_data."""
     @wraps(f)
     def wrapped(*args, **kwargs):
         if not session.get("is_admin"):
@@ -133,15 +136,14 @@ def admin_required(f):
 
 
 def signal_message(exc):
-    """Extract the human-readable message from a MySQL SIGNAL error."""
+    """Pull the readable text out of a database error raised by the trigger. Used by book_submit."""
     if exc.args and len(exc.args) > 1:
         return str(exc.args[1])
     return str(exc)
 
 
-# ------------------------------------------------------------ security ----
-
 def csrf_token():
+    """Return this session's form-protection token, creating it on first use. Used in every HTML form."""
     if "_csrf" not in session:
         session["_csrf"] = secrets.token_hex(16)
     return session["_csrf"]
@@ -152,8 +154,7 @@ app.jinja_env.globals["csrf_token"] = csrf_token
 
 @app.before_request
 def csrf_protect():
-    # Every state-changing request must carry the token that was rendered into
-    # the form, so another website can't submit forms on a logged-in user's behalf.
+    """Reject any form submission that does not carry the right token. Runs automatically before every POST."""
     if request.method == "POST":
         expected = session.get("_csrf")
         sent = request.form.get("csrf_token", "")
@@ -163,6 +164,7 @@ def csrf_protect():
 
 @app.after_request
 def security_headers(resp):
+    """Add browser-safety headers to every response. Runs automatically after every request."""
     resp.headers.setdefault("X-Content-Type-Options", "nosniff")
     resp.headers.setdefault("X-Frame-Options", "DENY")
     resp.headers.setdefault("Referrer-Policy", "same-origin")
@@ -174,7 +176,7 @@ _attempts_lock = threading.Lock()
 
 
 def rate_limited(key, limit, window_seconds):
-    """True if `key` already has `limit` recorded attempts in the last window."""
+    """True if this key has used up its allowed attempts in the time window. Used by register and login."""
     now = time.time()
     with _attempts_lock:
         hits = [t for t in _attempts.get(key, []) if now - t < window_seconds]
@@ -183,17 +185,19 @@ def rate_limited(key, limit, window_seconds):
 
 
 def record_attempt(key):
+    """Record one more attempt for this key. Used by register and login."""
     with _attempts_lock:
         _attempts.setdefault(key, []).append(time.time())
 
 
 def clear_attempts(key):
+    """Forget the recorded attempts for this key. Used by login after a successful login."""
     with _attempts_lock:
         _attempts.pop(key, None)
 
 
 def safe_next(target):
-    """Only follow same-site relative paths after login (blocks open redirects)."""
+    """Allow a redirect only to a page on this site. Used by login."""
     if target and target.startswith("/") and not target.startswith("//") and "\\" not in target:
         return target
     return url_for("index")
@@ -205,22 +209,23 @@ EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 @app.cli.command("make-admin")
 @click.argument("email")
 def make_admin(email):
-    """Give an existing account admin rights: flask --app app make-admin you@example.com"""
+    """Make an account an admin: flask --app app make-admin you@example.com"""
     db = get_db()
     email = email.strip().lower()
     with db.cursor() as cur:
+        # Query: does an account with this email exist?
         cur.execute("SELECT user_id FROM users WHERE email=%s", (email,))
         if not cur.fetchone():
             click.echo("No account with that email.")
             return
+        # Query: mark that account as admin.
         cur.execute("UPDATE users SET is_admin=1 WHERE email=%s", (email,))
     click.echo("Done: that account is now an admin.")
 
 
-# ---------------------------------------------------------------- auth ----
-
 @app.route("/register", methods=["GET", "POST"])
 def register():
+    """Show the sign-up form and create the account."""
     if request.method == "POST":
         name = request.form["name"].strip()
         email = request.form["email"].strip().lower()
@@ -241,10 +246,12 @@ def register():
             return redirect(url_for("register"))
         db = get_db()
         with db.cursor() as cur:
+            # Query: is this email already registered?
             cur.execute("SELECT user_id FROM users WHERE email=%s", (email,))
             if cur.fetchone():
                 flash("An account with that email already exists.", "danger")
                 return redirect(url_for("register"))
+            # Query: create the user row (password stored only as a hash).
             cur.execute(
                 "INSERT INTO users (name, email, password_hash) VALUES (%s,%s,%s)",
                 (name, email, generate_password_hash(password)),
@@ -256,6 +263,7 @@ def register():
 
 @app.route("/login", methods=["GET", "POST"])
 def login():
+    """Show the login form and log the user in."""
     if request.method == "POST":
         email = request.form["email"].strip().lower()
         password = request.form["password"]
@@ -266,11 +274,12 @@ def login():
             return render_template("app.html", page="login"), 429
         db = get_db()
         with db.cursor() as cur:
+            # Query: fetch the user for this email so the password hash can be checked.
             cur.execute("SELECT * FROM users WHERE email=%s", (email,))
             user = cur.fetchone()
         if user and check_password_hash(user["password_hash"], password):
             clear_attempts(pair_key)
-            session.clear()  # new session on login, so an old cookie can't be reused
+            session.clear()
             session.permanent = True
             session["user_id"] = user["user_id"]
             session["name"] = user["name"]
@@ -285,17 +294,18 @@ def login():
 
 @app.route("/logout")
 def logout():
+    """Log the user out."""
     session.clear()
     flash("Logged out.", "info")
     return redirect(url_for("index"))
 
 
-# -------------------------------------------------------------- search ----
-
 @app.route("/")
 def index():
+    """Home page: search form with the list of cities."""
     db = get_db()
     with db.cursor() as cur:
+        # Query: cities that have at least one station, for the From/To dropdowns.
         cur.execute(
             """
             SELECT DISTINCT c.city_id, c.name
@@ -309,7 +319,8 @@ def index():
 
 
 def seat_availability(cur, tcq_id, journey_date, from_seq, to_seq):
-    """Mirrors sp_add_passenger's logic, but counts instead of assigning."""
+    """Count free seats, free RAC places and the waitlist length for one seat pool. Used by search and book_submit."""
+    # Query 1: count normal seats with no overlapping confirmed passenger (free seats).
     cur.execute(
         """
         SELECT COUNT(*) AS n FROM seats s
@@ -326,6 +337,7 @@ def seat_availability(cur, tcq_id, journey_date, from_seq, to_seq):
     )
     available = cur.fetchone()["n"]
 
+    # Query 2: for each RAC seat, how many people already share it for this date and stretch.
     cur.execute(
         """
         SELECT s.seat_id,
@@ -342,6 +354,7 @@ def seat_availability(cur, tcq_id, journey_date, from_seq, to_seq):
     rac_rows = cur.fetchall()
     rac_available = sum(1 for r in rac_rows if (r["used"] or 0) < 2)
 
+    # Query 3: count waitlisted passengers on this train, class, quota and date.
     cur.execute(
         """
         SELECT COUNT(*) AS n FROM passengers pp
@@ -358,15 +371,12 @@ def seat_availability(cur, tcq_id, journey_date, from_seq, to_seq):
     return available, rac_available, wl_len
 
 
-# Simulated demand: on the real app, other people grab Tatkal seats as soon as
-# it opens. We only have this app's own bookings, so a pool also "sells out"
-# gradually after opening: each train+class+date gets a fixed sell-out time
-# (20 minutes to ~23 hours after opening) derived from its ids, and the seats
-# held for other buyers grow linearly until then. Set to False to turn it off.
+# Set to False to stop pretending that other people are buying Tatkal seats.
 TATKAL_SIMULATED_DEMAND = True
 
 
 def tatkal_simulated_held(train_id, class_code, journey_date, total_seats, opens_at):
+    """Seats assumed to be taken by other Tatkal buyers since the quota opened. Used by search and book_submit."""
     if not TATKAL_SIMULATED_DEMAND:
         return 0
     minutes = (datetime.now() - opens_at).total_seconds() / 60
@@ -377,9 +387,9 @@ def tatkal_simulated_held(train_id, class_code, journey_date, total_seats, opens
 
 
 def quota_window_status(quota, journey_date):
-    """Returns (is_open, opens_at_datetime). PyMySQL returns TIME columns as timedelta."""
+    """Return (is_open, opens_at) for a quota on a journey date. Used by search and book_submit."""
     open_date = journey_date - timedelta(days=quota["opens_days_before"])
-    open_time = quota["opens_at_time"]  # timedelta or None
+    open_time = quota["opens_at_time"]
     opens_at = datetime.combine(open_date, datetime.min.time())
     if open_time is not None:
         opens_at += open_time
@@ -389,6 +399,7 @@ def quota_window_status(quota, journey_date):
 
 @app.route("/search")
 def search():
+    """Find trains between two cities and show the seat status of each ticket option."""
     from_city_id = request.args.get("from_city_id", type=int)
     to_city_id = request.args.get("to_city_id", type=int)
     journey_date_str = request.args.get("journey_date")
@@ -405,8 +416,6 @@ def search():
     filters_active = bool(sel_classes or sel_slots or max_price or hide_wl or sort)
     show_tatkal = (journey_date - date.today()).days <= 1
 
-    # SQL fragments below come from fixed whitelists (never raw user input);
-    # user values (cities, classes, max fare) are bound as %s parameters.
     slot_sql = ""
     if sel_slots:
         slot_sql = " AND (" + " OR ".join(DEPARTURE_SLOTS[s][1] for s in sel_slots) + ")"
@@ -419,9 +428,7 @@ def search():
 
     db = get_db()
     with db.cursor() as cur:
-        # One query does the whole search: city-grouped trip finding (CTEs +
-        # window functions), the departure-time filter, fare calculation per
-        # class/quota, the class and max-fare filters, and the ordering.
+        # Query: the whole search in one statement (trains, fares, filters, sort); rows are grouped into trains below.
         cur.execute(
             f"""
             WITH from_matches AS (
@@ -460,7 +467,7 @@ def search():
                 FROM trip
                 JOIN classes c ON trip.is_premium = (c.code IN ('CC','EC'))
                 JOIN quotas q ON q.code IN ({quota_sql})
-                             AND NOT (trip.is_premium AND q.code = 'TQ')   -- Tejas / Vande Bharat have no Tatkal
+                             AND NOT (trip.is_premium AND q.code = 'TQ')
                 JOIN train_class_quota tcq ON tcq.train_id = trip.train_id
                                           AND tcq.class_id = c.class_id AND tcq.quota_id = q.quota_id
                 WHERE c.code IN ({class_marks})
@@ -477,8 +484,6 @@ def search():
         )
         rows = cur.fetchall()
 
-        # Group the flat rows back into trains; seat availability stays a
-        # per-option query (it depends on the journey date and existing bookings).
         trains, by_id = [], {}
         for r in rows:
             t = by_id.get(r["train_id"])
@@ -487,6 +492,7 @@ def search():
                                        "dep_time", "dep_day", "to_seq", "to_km", "to_station_id",
                                        "arr_time", "arr_day")}
                 t["distance_km"] = r["km"]
+                # Helper: show departure and arrival as HH:MM.
                 dep, arr = format_hhmm(t["dep_time"]), format_hhmm(t["arr_time"])
                 if dep and arr:
                     day_note = f" (+{t['arr_day'] - t['dep_day']}d)" if t["arr_day"] and t["dep_day"] and t["arr_day"] > t["dep_day"] else ""
@@ -496,14 +502,15 @@ def search():
                 t["options"] = []
                 by_id[t["train_id"]] = t
                 trains.append(t)
+            # Helper: has this quota opened for the journey date, and when?
             is_open, opens_at = quota_window_status(r, journey_date)
+            # Helper: runs the three seat-count queries for this ticket option.
             avail, rac_avail, wl_len = seat_availability(
                 cur, r["tcq_id"], journey_date, t["from_seq"], t["to_seq"]
             )
-            # Tatkal never has RAC or a waitlist: once it is sold out, or on the
-            # day of the journey (Tatkal closes the day before), it shows REGRET.
             is_tatkal = r["quota_code"] == "TQ"
             if is_tatkal and is_open:
+                # Helper: seats assumed taken by other Tatkal buyers.
                 held = tatkal_simulated_held(r["train_id"], r["class_code"], journey_date_str,
                                              r["total_seats"], opens_at)
                 avail = max(0, avail - held)
@@ -533,6 +540,7 @@ def search():
 
         if trains:
             station_ids = {t["from_station_id"] for t in trains} | {t["to_station_id"] for t in trains}
+            # Query: names and codes of the boarding and destination stations in the results (one query, IN list).
             cur.execute(
                 f"SELECT station_id, code, name FROM stations WHERE station_id IN ({','.join(['%s']*len(station_ids))})",
                 tuple(station_ids),
@@ -555,21 +563,23 @@ def search():
     )
 
 
-# -------------------------------------------------------------- booking ----
-
 @app.route("/book/<int:train_id>/<class_code>/<quota_code>")
 @login_required
 def book_form(train_id, class_code, quota_code):
+    """Show the passenger form for the chosen train, class and quota."""
     from_id = request.args.get("from_id", type=int)
     to_id = request.args.get("to_id", type=int)
     journey_date = request.args.get("journey_date")
 
     db = get_db()
     with db.cursor() as cur:
+        # Query: the train being booked.
         cur.execute("SELECT * FROM trains WHERE train_id=%s", (train_id,))
         train = cur.fetchone()
+        # Query: the boarding and destination stations.
         cur.execute("SELECT * FROM stations WHERE station_id IN (%s,%s)", (from_id, to_id))
         stations = {s["station_id"]: s for s in cur.fetchall()}
+        # Query: stop numbers of those two stations on this train's route, to check the order.
         cur.execute(
             "SELECT station_id, seq_no FROM routes WHERE train_id=%s AND station_id IN (%s,%s)",
             (train_id, from_id, to_id),
@@ -592,6 +602,7 @@ def book_form(train_id, class_code, quota_code):
 @app.route("/book", methods=["POST"])
 @login_required
 def book_submit():
+    """Validate the form, create the booking, add each passenger and record the payment."""
     train_id = request.form.get("train_id", type=int)
     class_code = request.form["class_code"]
     quota_code = request.form["quota_code"]
@@ -604,7 +615,6 @@ def book_submit():
     berth_prefs = request.form.getlist("berth_pref[]")
     food_prefs = request.form.getlist("food_pref[]")
 
-    # Server-side checks: the browser form can be bypassed with a hand-made request.
     pax = list(zip(names, ages, genders, berth_prefs, food_prefs))
     pax = [p for p in pax if p[0].strip()]
     valid = (
@@ -620,29 +630,33 @@ def book_submit():
     db = get_db()
     try:
         with db.cursor() as cur:
+            # Query: train name, to know if it is Tejas or Vande Bharat.
             cur.execute("SELECT name FROM trains WHERE train_id=%s", (train_id,))
             train_name = cur.fetchone()["name"]
+            # Query: class prices (per km, base fare, reservation charge).
             cur.execute("SELECT class_id, fare_per_km, base_fare, reservation_charge FROM classes WHERE code=%s", (class_code,))
             cls = cur.fetchone()
+            # Query: quota fare multiplier.
             cur.execute("SELECT quota_id, fare_multiplier FROM quotas WHERE code=%s", (quota_code,))
             quota = cur.fetchone()
+            # Query: stop number and km of the boarding station on this train.
             cur.execute(
                 "SELECT seq_no, distance_km FROM routes WHERE train_id=%s AND station_id=%s",
                 (train_id, from_id),
             )
             r1 = cur.fetchone()
+            # Query: stop number and km of the destination station on this train.
             cur.execute(
                 "SELECT seq_no, distance_km FROM routes WHERE train_id=%s AND station_id=%s",
                 (train_id, to_id),
             )
             r2 = cur.fetchone()
-            # The boarding station must come before the destination on this train's route.
             if not r1 or not r2 or r1["seq_no"] >= r2["seq_no"]:
                 flash("Invalid journey: the destination must come after the boarding station on this train's route.", "danger")
                 return redirect(url_for("index"))
             distance = r2["distance_km"] - r1["distance_km"]
 
-            # dynamic surge based on current confirmed occupancy for this class+quota+date
+            # Query: the seat pool for this train, class and quota, and its size.
             cur.execute(
                 "SELECT tcq_id, total_seats FROM train_class_quota WHERE train_id=%s AND class_id=%s AND quota_id=%s",
                 (train_id, cls["class_id"], quota["quota_id"]),
@@ -652,7 +666,7 @@ def book_submit():
                 db.rollback()
                 flash("Tatkal is not available on Tejas / Vande Bharat trains.", "danger")
                 return redirect(url_for("index"))
-            if tcq is None:      # this train has no seat pool for that class / quota
+            if tcq is None:
                 db.rollback()
                 flash("That class or quota is not offered on this train.", "danger")
                 return redirect(url_for("index"))
@@ -660,6 +674,7 @@ def book_submit():
                 db.rollback()
                 flash("REGRET: Tatkal is closed on the day of the journey.", "danger")
                 return redirect(url_for("index"))
+            # Query: confirmed passengers so far for this train, class, quota and date (used for the surge price).
             cur.execute(
                 """
                 SELECT COUNT(*) AS n FROM passengers pp
@@ -679,14 +694,16 @@ def book_submit():
             elif occ_pct >= 50:
                 surge = 1.1
 
-            # Tatkal: same availability the search page showed (real bookings plus
-            # the simulated other buyers), and no waitlist if it is not enough.
             if quota_code == "TQ":
+                # Query: the quota's opening rule (days before and time of day).
                 cur.execute("SELECT opens_days_before, opens_at_time FROM quotas WHERE quota_id=%s", (quota["quota_id"],))
                 q_row = cur.fetchone()
+                # Helper: when did Tatkal open for this journey date?
                 _, opens_at = quota_window_status(q_row, datetime.strptime(journey_date, "%Y-%m-%d").date())
+                # Helper: free confirmed seats right now for this stretch.
                 free, _, _ = seat_availability(cur, tcq["tcq_id"], datetime.strptime(journey_date, "%Y-%m-%d").date(),
                                                r1["seq_no"], r2["seq_no"])
+                # Helper: seats assumed taken by other Tatkal buyers.
                 held = tatkal_simulated_held(train_id, class_code, journey_date, tcq["total_seats"], opens_at)
                 if max(0, free - held) < len(pax):
                     db.rollback()
@@ -694,13 +711,13 @@ def book_submit():
                           "Tatkal has no waiting list.", "danger")
                     return redirect(url_for("index"))
 
+            # Helper: fare for one passenger from distance, class, quota and surge.
             fare_per_pax = compute_fare(distance, cls, float(quota["fare_multiplier"]), surge, is_premium=is_premium_train(train_name))
 
-            # PNR: a random, unguessable 10-digit number (first digit never 0),
-            # not the table's sequential auto-increment. Retry on the rare clash.
             for _ in range(10):
                 pnr_id = 1_000_000_000 + secrets.randbelow(9_000_000_000)
                 try:
+                    # Query: create the booking with a random PNR (the trigger checks the booking rules here).
                     cur.execute(
                         """
                         INSERT INTO bookings (pnr_id, user_id, train_id, class_id, quota_id, journey_date,
@@ -712,7 +729,7 @@ def book_submit():
                     )
                     break
                 except pymysql.err.IntegrityError as e:
-                    if e.args[0] != 1062:     # only "duplicate PNR" is retried
+                    if e.args[0] != 1062:
                         raise
             else:
                 raise RuntimeError("could not allocate a PNR")
@@ -720,14 +737,14 @@ def book_submit():
             for name, age, gender, berth_pref, food_pref in zip(names, ages, genders, berth_prefs, food_prefs):
                 if not name.strip():
                     continue
+                # Query: stored procedure sp_add_passenger gives this passenger a seat, RAC place or waitlist number.
                 cur.execute(
                     "CALL sp_add_passenger(%s,%s,%s,%s,%s,%s,@pid,@status)",
                     (pnr_id, name.strip(), int(age), gender, berth_pref, food_pref),
                 )
+                # Query: read back the procedure's output values (passenger id and status).
                 cur.execute("SELECT @pid AS pid, @status AS status")
                 got = cur.fetchone()
-                # Tatkal has no RAC / waitlist: if this passenger did not get a
-                # confirmed seat, undo the whole booking and show REGRET.
                 if quota_code == "TQ" and got["status"] != "CONFIRMED":
                     db.rollback()
                     flash("REGRET: Tatkal tickets for this train and class are sold out. "
@@ -735,7 +752,9 @@ def book_submit():
                     return redirect(url_for("index"))
 
             total_fare = fare_per_pax * len([n for n in names if n.strip()])
+            # Query: save the final total fare on the booking.
             cur.execute("UPDATE bookings SET total_fare=%s WHERE pnr_id=%s", (total_fare, pnr_id))
+            # Query: record the payment for this PNR.
             cur.execute(
                 "INSERT INTO payments (pnr_id, amount, status) VALUES (%s,%s,'SUCCESS')",
                 (pnr_id, total_fare),
@@ -743,16 +762,16 @@ def book_submit():
         db.commit()
     except pymysql.err.OperationalError as e:
         db.rollback()
+        # Helper: show the database trigger's message to the user.
         flash(signal_message(e), "danger")
         return redirect(url_for("index"))
 
     return redirect(url_for("pnr_detail", pnr_id=pnr_id))
 
 
-# ------------------------------------------------------------- PNR / cx ----
-
 @app.route("/pnr-status", methods=["GET", "POST"])
 def pnr_status():
+    """Look up a ticket by PNR number."""
     if request.method == "POST":
         pnr_id = request.form["pnr"].strip().lstrip("0") or "0"
         if not pnr_id.isdigit() or len(pnr_id) > 12:
@@ -765,8 +784,10 @@ def pnr_status():
 @app.route("/pnr/<int:pnr_id>")
 @login_required
 def pnr_detail(pnr_id):
+    """Show one ticket with its passengers and seat status."""
     db = get_db()
     with db.cursor() as cur:
+        # Query: the booking joined with train, class, quota, stations and route times.
         cur.execute(
             """
             SELECT b.*, t.number AS train_number, t.name AS train_name,
@@ -787,11 +808,10 @@ def pnr_detail(pnr_id):
             (pnr_id,),
         )
         booking = cur.fetchone()
-        # Same message whether the PNR doesn't exist or belongs to someone else,
-        # so PNR numbers can't be probed to see which exist.
         if not booking or (booking["user_id"] != session["user_id"] and not session.get("is_admin")):
             flash("No such PNR.", "danger")
             return redirect(url_for("pnr_status"))
+        # Helper: show departure and arrival as HH:MM.
         dep = format_hhmm(booking["dep_time"])
         arr = format_hhmm(booking["arr_time"])
         if dep and arr:
@@ -799,16 +819,20 @@ def pnr_detail(pnr_id):
             booking["timing"] = f"Dep {dep} → Arr {arr}{day_note}"
         else:
             booking["timing"] = None
+        # Query: the passengers on this PNR.
         cur.execute(
             "SELECT * FROM passengers WHERE pnr_id=%s ORDER BY passenger_id", (pnr_id,)
         )
         passengers = cur.fetchall()
         for p in passengers:
             if p["seat_status"] == "CONFIRMED":
+                # Query: coach, seat number and berth of this confirmed passenger.
                 cur.execute("SELECT coach_number, seat_number, berth_type FROM seats WHERE seat_id=%s", (p["seat_id"],))
                 seat = cur.fetchone()
+                # Helper: berth code as readable text.
                 p["display_status"] = f"CNF / {seat['coach_number']}-{seat['seat_number']}{format_berth(seat['berth_type'])}"
             elif p["seat_status"] == "RAC":
+                # Query: coach, seat number and berth of this RAC passenger.
                 cur.execute("SELECT coach_number, seat_number, berth_type FROM seats WHERE seat_id=%s", (p["seat_id"],))
                 seat = cur.fetchone()
                 p["display_status"] = f"RAC {p['rac_slot']} / {seat['coach_number']}-{seat['seat_number']}{format_berth(seat['berth_type'])}"
@@ -824,8 +848,10 @@ def pnr_detail(pnr_id):
 @app.route("/my-bookings")
 @login_required
 def my_bookings():
+    """List the logged-in user's bookings."""
     db = get_db()
     with db.cursor() as cur:
+        # Query: this user's bookings joined with train and station names.
         cur.execute(
             """
             SELECT b.pnr_id, b.journey_date, b.status, b.total_fare,
@@ -846,8 +872,10 @@ def my_bookings():
 @app.route("/cancel/<int:passenger_id>", methods=["POST"])
 @login_required
 def cancel_passenger(passenger_id):
+    """Cancel one passenger and promote the RAC and waitlist queue."""
     db = get_db()
     with db.cursor() as cur:
+        # Query: who owns the booking this passenger belongs to (users can only cancel their own).
         cur.execute(
             "SELECT b.user_id, b.pnr_id, p.name FROM passengers p JOIN bookings b ON b.pnr_id=p.pnr_id WHERE p.passenger_id=%s",
             (passenger_id,),
@@ -856,7 +884,9 @@ def cancel_passenger(passenger_id):
         if not row or row["user_id"] != session["user_id"]:
             flash("Not your booking.", "danger")
             return redirect(url_for("my_bookings"))
+        # Query: stored procedure sp_cancel_passenger cancels and promotes the RAC and waitlist queue.
         cur.execute("CALL sp_cancel_passenger(%s)", (passenger_id,))
+        # Query: did the whole ticket end up cancelled?
         cur.execute("SELECT status FROM bookings WHERE pnr_id=%s", (row["pnr_id"],))
         whole_ticket = cur.fetchone()["status"] == "CANCELLED"
     db.commit()
@@ -867,21 +897,23 @@ def cancel_passenger(passenger_id):
     return redirect(url_for("pnr_detail", pnr_id=row["pnr_id"]))
 
 
-# ------------------------------------------------------------ dashboard ----
-
 @app.route("/dashboard")
 @admin_required
 def dashboard():
+    """Admin dashboard page."""
     return render_template("app.html", page="dashboard")
 
 
 @app.route("/api/dashboard-data")
 @admin_required
 def dashboard_data():
+    """JSON for the dashboard: occupancy and revenue from the two views."""
     db = get_db()
     with db.cursor() as cur:
+        # Query: view vw_train_occupancy (confirmed, RAC and waitlist counts per train, class and date).
         cur.execute("SELECT * FROM vw_train_occupancy ORDER BY journey_date, number")
         occupancy = cur.fetchall()
+        # Query: view vw_revenue_by_train (bookings and revenue per train).
         cur.execute("SELECT * FROM vw_revenue_by_train ORDER BY total_revenue DESC")
         revenue = cur.fetchall()
     for row in occupancy:
